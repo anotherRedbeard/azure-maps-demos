@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Azure Maps - My Map Clone</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+    
+    <!-- Add required Azure Maps resources -->
+    <script src="https://atlas.microsoft.com/sdk/javascript/mapcontrol/3/atlas.min.js"></script>
+    <link rel="stylesheet" href="https://atlas.microsoft.com/sdk/javascript/mapcontrol/3/atlas.min.css" type="text/css" />
+    
+    <!-- No authentication library needed for anonymous auth -->
+    
+    <style>
+        html, body { height: 100%; margin: 0; padding: 0; }
+        #map { width: 100%; height: 100%; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: white;
+            padding: 10px;
+            z-index: 1000;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+            border-radius: 4px;
+        }
+        button { 
+            display: block; 
+            margin: 5px 0; 
+            width: 130px; 
+            padding: 8px;
+            cursor: pointer;
+            border: none;
+            background-color: #0078d4;
+            color: white;
+            border-radius: 4px;
+            transition: background-color 0.2s ease;
+        }
+        button:hover {
+            background-color: #005a9e;
+        }
+        .active {
+            background-color: #004578;
+            font-weight: bold;
+        }
+        #statusInfo {
+            margin-top: 8px;
+            padding: 10px;
+            font-size: 12px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            display: none;
+        }
+        #statusInfo button {
+            background-color: #4CAF50;
+            margin-top: 8px;
+            font-weight: bold;
+        }
+        #statusInfo button:hover {
+            background-color: #45a049;
+        }
+        #floating-pin-info {
+            position: absolute;
+            display: none;
+            background-color: white;
+            padding: 15px;
+            border-radius: 4px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            z-index: 2000;
+            width: 260px;
+        }
+        .pin-popup {
+            padding: 5px;
+            max-width: 250px;
+        }
+        .pin-form input, .pin-form textarea {
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .pin-form textarea {
+            height: 80px;
+            resize: vertical;
+        }
+        .pin-form-buttons {
+            display: flex;
+            justify-content: space-between;
+        }
+        .pin-form-buttons button {
+            width: 48%;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h3 style="margin-top:0; margin-bottom: 10px;">My Maps</h3>
+        <button id="btnPin">Add Pin</button>
+        <button id="btnClear">Clear Map</button>
+        <button id="btnExport">Export Map</button>
+        <button id="btnImport">Import Map</button>
+        <input type="file" id="fileImport" accept=".json" style="display: none;">
+        <div id="statusInfo"></div>
+    </div>
+    
+    <!-- Floating pin info panel that appears near the pin -->
+    <div id="floating-pin-info">
+        <h4 style="margin-top:0; margin-bottom: 10px;">Pin Details</h4>
+        <div class="pin-form">
+            <input type="text" id="pinName" placeholder="Pin name">
+            <textarea id="pinDesc" placeholder="Description"></textarea>
+            <div class="pin-form-buttons">
+                <button id="btnCancelPin" style="background-color: #d83b01;">Cancel</button>
+                <button id="btnSavePin" style="background-color: #4CAF50;">Save</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="map"></div>
+
+    <script>
+        // Global variables
+        let map, datasource;
+        let addingPin = false;
+        let tempPin = null;
+        let selectedPin = null;
+
+        // Load config.json and initialize the map
+        async function loadConfigAndInitMap() {
+            let config;
+            try {
+                const response = await fetch('../config.json');
+                config = await response.json();
+            } catch (err) {
+                console.error('Failed to load config.json:', err);
+                alert('Could not load config.json. Please ensure it exists and is accessible.');
+                return;
+            }
+            
+            const azureMapsClientId = config.azureMapsClientId;
+            const token = config.token;
+            
+            // Create a status message
+            const statusInfo = document.getElementById('statusInfo');
+            statusInfo.innerHTML = `<p>Initializing map...</p>`;
+            statusInfo.style.display = 'block';
+            
+            try {
+                // Initialize map with anonymous authentication using the client ID
+                map = new atlas.Map('map', {
+                    center: [-122.33, 47.6], // Seattle
+                    zoom: 10,
+                    style: 'road', // Could be 'satellite', 'grayscale_dark', 'grayscale_light', 'night', or 'road'
+                    view: 'Auto',
+                    authOptions: {
+                        authType: 'anonymous',
+                        clientId: azureMapsClientId,
+                        getToken: function(resolve, reject, map) {
+                            resolve(token);
+                        },
+                    }
+                });
+                
+                // Hide status once the map is initializing
+                statusInfo.style.display = 'none';
+                
+                // Add error handler
+                map.events.add('error', function(e) {
+                    console.error('Azure Maps error:', e);
+                });
+                
+                // Wait for map to load
+                map.events.add('ready', function() {
+                    console.log("Map loaded successfully");
+                    
+                    // Create a data source to store features
+                    datasource = new atlas.source.DataSource();
+                    map.sources.add(datasource);
+
+                    // Add a simple symbol layer for rendering pins
+                    const symbolLayer = new atlas.layer.SymbolLayer(datasource, 'pin-layer', {
+                        iconOptions: {
+                            image: 'pin-round-blue',
+                            anchor: 'center',
+                            allowOverlap: true
+                        }
+                    });
+                    map.layers.add(symbolLayer);                    // Popup template for showing pin info
+                    const popupTemplate = '<div class="pin-popup"><b>{title}</b><br>{description}</div>';
+                    
+                    // Create a popup but don't open it yet
+                    const popup = new atlas.Popup({
+                        pixelOffset: [0, -30],
+                        closeButton: true
+                    });
+                    
+                    // Add unified click event to the map for both adding pins and showing pin info
+                    map.events.add('click', function(e) {
+                        // Get the features under the mouse
+                        try {
+                            // Check if the click is on a symbol using the pin layer ID
+                            const features = map.layers.getRenderedShapes(e.position, 'pin-layer') || [];
+                            
+                            // If click is on an existing pin and we're not in add mode, show pin info
+                            if (features.length > 0 && !addingPin) {
+                                // Prevent the map from being clicked behind the symbol
+                                e.preventDefault();
+                                
+                                // Get the pin feature that was clicked
+                                const pin = features[0];
+                                
+                                // Get the pin properties
+                                const properties = pin.properties || {};
+                                const pinName = properties.title || 'Unnamed Pin';
+                                const pinDesc = properties.description || 'No description';
+                                
+                                // Set popup content and open it
+                                const content = popupTemplate
+                                    .replace('{title}', pinName)
+                                    .replace('{description}', pinDesc);
+                                
+                                popup.setOptions({
+                                    content: content,
+                                    position: pin.data.geometry.coordinates
+                                });
+                                
+                                popup.open(map);
+                            } 
+                            // If we're in add pin mode and clicked on empty space, add a pin
+                            else if (features.length === 0 && addingPin) {
+                                handleMapClick(e);
+                            }
+                        } catch (err) {
+                            console.warn('Error handling map click:', err);
+                        }
+                    });
+                    
+                    // Add mouse over/out events for better user feedback
+                    map.events.add('mousemove', function(e) {
+                        try {
+                            // Use the same layer ID as we defined earlier
+                            const features = map.layers.getRenderedShapes(e.position, 'pin-layer');
+                            map.getCanvas().style.cursor = features && features.length > 0 ? 'pointer' : 'grab';
+                        } catch (err) {
+                            // Silent fail - just use default cursor
+                            map.getCanvas().style.cursor = 'grab';
+                        }
+                    });
+
+                    // Set up button events
+                    setupButtonEvents();
+                });
+            } catch (error) {
+                console.error("Failed to initialize map:", error);
+                // Show user-friendly error
+                statusInfo.innerHTML = `
+                    <p>Failed to initialize the map: ${error.message || 'Unknown error'}</p>
+                    <p>Please check your connection and refresh the page.</p>
+                    <button onclick="window.location.reload()">Refresh Page</button>
+                `;
+                statusInfo.style.display = 'block';
+            }
+        }
+
+        function handleMapClick(e) {
+            // Get the clicked location
+            const position = e.position;
+            const pixelPosition = e.pixel;
+            
+            // Check if there are any pins at this position
+            let features = [];
+            try {
+                features = map.layers.getRenderedShapes(position, 'pin-layer') || [];
+            } catch (err) {
+                console.warn('Error when checking for pins during add:', err);
+            }
+            
+            // Only add a pin if we're not clicking on an existing pin
+            if (features.length === 0) {
+                // use position to create a new pin
+                const coord = position;
+                console.log('Clicked coordinates:', coord);
+                    
+                if (coord) {
+                        // Create a temporary pin feature
+                        tempPin = new atlas.data.Feature(new atlas.data.Point([coord[0], coord[1]]));
+                        
+                        // Add temporary properties
+                        tempPin.properties = {
+                            temporary: true,
+                            title: 'New Pin',
+                            description: 'Add your description'
+                        };
+                        console.log('Adding temporary pin:', tempPin);
+                        
+                        // Add the temporary pin to the data source
+                        datasource.add(tempPin);
+                        
+                        // Position and show the floating pin info panel near the click
+                        const floatingPinInfo = document.getElementById('floating-pin-info');
+                        
+                        // Reset any previous transform and use direct positioning
+                        floatingPinInfo.style.transform = 'none';
+                        
+                        // Get the map container position to calculate proper coordinates
+                        const mapContainer = map.getCanvasContainer();
+                        const mapRect = mapContainer.getBoundingClientRect();
+                       
+                        // Get the height and width of the floating pin info panel
+                        const floatingPinInfoWidth = 260;
+                        const floatingPinInfoHeight = 200;
+                        
+                        // Calculate position keeping the panel within map bounds
+                        let left = pixelPosition[0] - (floatingPinInfoWidth / 2) - 10; // Center the panel horizontally
+                        let top = pixelPosition[1] - floatingPinInfoHeight - 60; // Position above the pin
+                        
+                        // Set panel position
+                        floatingPinInfo.style.left = left + 'px';
+                        floatingPinInfo.style.top = top + 'px';
+                        floatingPinInfo.style.display = 'block';
+                        
+                        // Hide the status info
+                        document.getElementById('statusInfo').style.display = 'none';
+                        
+                        // Clear and focus on the name input
+                        document.getElementById('pinName').value = '';
+                        document.getElementById('pinDesc').value = '';
+                        document.getElementById('pinName').focus();
+                        
+                        // Store the pixel position for reference
+                        tempPin.properties.pixelPosition = pixelPosition;
+                        
+                        // Reset the adding pin state
+                        addingPin = false;
+                        
+                        // Reset active button highlighting
+                        document.querySelectorAll('#controls button').forEach(btn => {
+                            btn.classList.remove('active');
+                        });
+                }
+            }
+        }
+        
+        function savePinDetails() {
+            if (!tempPin) return;
+            
+            try {
+                // Get values from the form
+                const name = document.getElementById('pinName').value.trim() || 'Unnamed Pin';
+                const description = document.getElementById('pinDesc').value.trim() || 'No description';
+                
+                // Get the coordinates from the pin's geometry
+                const coordinates = tempPin.geometry.coordinates;
+                
+                // First, remove the temporary pin
+                datasource.remove(tempPin);
+                
+                // Create a new permanent pin with the metadata
+                const permanentPin = new atlas.data.Feature(new atlas.data.Point(coordinates), {
+                    title: name,
+                    description: description
+                });
+                
+                // Add the permanent pin to the data source
+                datasource.add(permanentPin);
+                console.log('Saving pin:', permanentPin);
+                
+                // Hide the floating pin info panel
+                document.getElementById('floating-pin-info').style.display = 'none';
+                
+                // Show a brief confirmation popup
+                const content = `<div class="pin-popup"><b>Pin Added:</b><br>${name}</div>`;
+                
+                const confirmPopup = new atlas.Popup({
+                    position: coordinates,
+                    content: content,
+                    pixelOffset: [0, -30],
+                    closeButton: false
+                });
+                
+                confirmPopup.open(map);
+                
+                // Close the popup after 2 seconds
+                setTimeout(() => {
+                    confirmPopup.close();
+                }, 2000);
+                
+                // Reset the temp pin
+                tempPin = null;
+            } catch (error) {
+                console.error('Error saving pin:', error);
+                alert('Error saving pin. Please try again.');
+            }
+        }
+        
+        function cancelPinCreation() {
+            if (tempPin) {
+                // Remove the temporary pin
+                datasource.remove(tempPin);
+                tempPin = null;
+            }
+            
+            // Hide the floating pin info panel
+            document.getElementById('floating-pin-info').style.display = 'none';
+        }
+        
+        function setupButtonEvents() {
+            // Pin button - add markers/points to the map
+            document.getElementById('btnPin').addEventListener('click', () => {
+                setActiveButton('btnPin');
+                
+                // Set state to adding pin mode
+                addingPin = true;
+                
+                // Show status info with instructions
+                document.getElementById('floating-pin-info').style.display = 'none';
+                const statusInfo = document.getElementById('statusInfo');
+                statusInfo.innerHTML = '<span>Click on the map to add a pin</span>';
+                statusInfo.style.display = 'block';
+            });
+            
+            // Clear button - remove all pins from the map
+            document.getElementById('btnClear').addEventListener('click', () => {
+                // Clear all data from the data source
+                datasource.clear();
+                
+                // Hide the info panels
+                document.getElementById('floating-pin-info').style.display = 'none';
+                document.getElementById('statusInfo').style.display = 'none';
+                
+                // Reset temp pin
+                tempPin = null;
+                
+                // Reset UI state
+                document.querySelectorAll('#controls button').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+            });
+            
+            // Save pin button - save the pin details
+            document.getElementById('btnSavePin').addEventListener('click', savePinDetails);
+            
+            // Cancel pin button - cancel pin creation
+            document.getElementById('btnCancelPin').addEventListener('click', cancelPinCreation);
+            
+            // Export button - export map data
+            document.getElementById('btnExport').addEventListener('click', exportMapData);
+            
+            // Import button - import map data
+            document.getElementById('btnImport').addEventListener('click', () => {
+                document.getElementById('fileImport').click();
+            });
+            
+            // File input change event - handle file selection
+            document.getElementById('fileImport').addEventListener('change', (e) => {
+                if (!e.target.files || e.target.files.length === 0) return;
+                
+                const file = e.target.files[0];
+                const reader = new FileReader();
+                
+                reader.onload = (event) => {
+                    const jsonData = event.target.result;
+                    importMapData(jsonData);
+                    // Reset the input to allow importing the same file again
+                    e.target.value = '';
+                };
+                
+                reader.readAsText(file);
+            });
+            
+            // Add keyboard support for Enter to save pin details
+            document.getElementById('pinDesc').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && e.ctrlKey) {
+                    // Save pin on Ctrl+Enter
+                    e.preventDefault();
+                    savePinDetails();
+                }
+            });
+            
+            // Add keyboard support for Escape to cancel pin adding
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    if (tempPin) {
+                        // Remove the temp pin
+                        datasource.remove(tempPin);
+                        tempPin = null;
+                        
+                        // Hide the pin info panel
+                        document.getElementById('floating-pin-info').style.display = 'none';
+                        
+                        // Reset UI state
+                        document.querySelectorAll('#controls button').forEach(btn => {
+                            btn.classList.remove('active');
+                        });
+                    }
+                    
+                    if (addingPin) {
+                        // Cancel pin adding mode
+                        addingPin = false;
+                        document.getElementById('statusInfo').style.display = 'none';
+                        
+                        // Reset UI state
+                        document.querySelectorAll('#controls button').forEach(btn => {
+                            btn.classList.remove('active');
+                        });
+                    }
+                }
+            });
+        }
+        
+        // Function to export map data to JSON
+        function exportMapData() {
+            // Get all pins from the datasource
+            const pins = datasource.getShapes();
+            
+            if (!pins || pins.length === 0) {
+                alert('No pins to export!');
+                return;
+            }
+            
+            // Convert pins to GeoJSON
+            const features = [];
+            
+            pins.forEach(pin => {
+                // Only include permanent pins, not temporary ones
+                if (!pin.data.properties || !pin.data.properties.temporary) {
+                    features.push({
+                        type: 'Feature',
+                        geometry: {
+                            type: 'Point',
+                            coordinates: pin.data.geometry.coordinates
+                        },
+                        properties: {
+                            title: pin.data.properties.title || 'Unnamed Pin',
+                            description: pin.data.properties.description || ''
+                        }
+                    });
+                }
+            });
+            
+            const geoJson = {
+                type: 'FeatureCollection',
+                features: features
+            };
+            
+            // Convert to JSON string
+            const jsonString = JSON.stringify(geoJson, null, 2);
+            
+            // Create a blob and download link
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'my-map-data.json';
+            a.click();
+            
+            // Clean up
+            URL.revokeObjectURL(url);
+        }
+        
+        // Function to import map data from JSON
+        function importMapData(jsonData) {
+            try {
+                const geoJson = JSON.parse(jsonData);
+                
+                if (!geoJson || !geoJson.features) {
+                    throw new Error('Invalid GeoJSON format');
+                }
+                
+                // Clear existing pins
+                datasource.clear();
+                
+                // Add each feature from the GeoJSON
+                geoJson.features.forEach(feature => {
+                    if (feature.geometry && feature.geometry.type === 'Point') {
+                        const point = new atlas.data.Point(feature.geometry.coordinates);
+                        const pin = new atlas.data.Feature(point, {
+                            title: feature.properties.title || 'Unnamed Pin',
+                            description: feature.properties.description || ''
+                        });
+                        
+                        datasource.add(pin);
+                    }
+                });
+                
+                // Adjust map view to show all pins
+                if (geoJson.features.length > 0) {
+                    // Get positions of all pins
+                    const positions = geoJson.features
+                        .filter(feature => feature.geometry && feature.geometry.type === 'Point')
+                        .map(feature => feature.geometry.coordinates);
+                    
+                    if (positions.length > 0) {
+                        // Calculate bounds manually
+                        let west = positions[0][0];
+                        let east = positions[0][0];
+                        let south = positions[0][1];
+                        let north = positions[0][1];
+                        
+                        for (let i = 1; i < positions.length; i++) {
+                            const lon = positions[i][0];
+                            const lat = positions[i][1];
+                            
+                            west = Math.min(west, lon);
+                            east = Math.max(east, lon);
+                            south = Math.min(south, lat);
+                            north = Math.max(north, lat);
+                        }
+                        
+                        // Add some padding
+                        const padding = 0.1;  // About 10% of the area
+                        west -= padding;
+                        east += padding;
+                        south -= padding;
+                        north += padding;
+                        
+                        // Use a simpler method to set the camera based on coordinates
+                        if (positions.length === 1) {
+                            // If there's only one point, center on it with appropriate zoom
+                            map.setCamera({
+                                center: positions[0],
+                                zoom: 12
+                            });
+                        } else {
+                            // For multiple points, use the camera bounds
+                            map.setCamera({
+                                bounds: [west, south, east, north],
+                                padding: 50
+                            });
+                        }
+                    }
+                }
+                
+                alert(`Successfully imported ${geoJson.features.length} pins`);
+                return true;
+            } catch (error) {
+                console.error('Error importing map data:', error);
+                alert('Error importing map data. Please check the file format.');
+                return false;
+            }
+        }
+        
+        function setActiveButton(buttonId) {
+            // Reset all buttons
+            document.querySelectorAll('#controls button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Set the clicked button to active
+            document.getElementById(buttonId).classList.add('active');
+        }
+        
+        // Start the app
+        loadConfigAndInitMap();
+    </script>
+</body>
+</html>
+    <script>
+        // Start the app
+        loadConfigAndInitMap();
+    </script>
+</body>
+</html>
